@@ -10,8 +10,22 @@
  * hooks run in the process's own syscall context, so bpf_get_current_comm
  * identifies the caller exactly, and denying at connect/bind time stops
  * the traffic before any packet is sent. Both connect (outbound) and bind
- * (local port for listeners) are filtered so "only that port" holds in
- * both directions of setup.
+ * (listeners) are filtered so "only that port" holds in
+ * both directions of setup. Only TCP is filtered (`ctx->protocol` check);
+ * other protocols are unaffected.
+ *
+ * A zero port is allowed: `bind(0)` asks the kernel for an ephemeral port,
+ * which is not "using another port". (`connect` to port 0 is invalid and
+ * fails later regardless.)
+ *
+ * An empty or zeroed config fails open (allows everything). The loader
+ * always writes both maps before attaching, so this only triggers if the
+ * maps are tampered with; failing closed there would risk a self-imposed
+ * outage that is harder to debug than an explicit misconfiguration.
+ *
+ * Matching is by `comm`, which a process can change for itself: this
+ * filter is process-convenience scoping, not a security boundary. For hard
+ * isolation use cgroup membership or LSM labels instead.
  *
  * IPv4 and IPv6 are both covered. Return value: 1 = allow, 0 = deny.
  */
@@ -20,6 +34,7 @@
 #include <bpf/bpf_helpers.h>
 
 #define TASK_COMM_LEN 16
+#define IPPROTO_TCP 6
 
 struct p2_target {
 	char comm[TASK_COMM_LEN];
@@ -79,10 +94,18 @@ static __always_inline __u16 p2_nport(__u32 user_port) {
 	return bpf_ntohs(p);
 }
 
-static __always_inline int p2_filter(__u32 user_port) {
+static __always_inline int p2_filter(struct bpf_sock_addr *ctx) {
 	__u32 zero = 0;
 	__u32 *allowed;
 
+	if (ctx->protocol != IPPROTO_TCP) {
+		p2_count(0);
+		return 1;
+	}
+	if ((ctx->user_port & 0xffff) == 0) {
+		p2_count(0);
+		return 1; /* bind(0): ephemeral allocation, not a port choice */
+	}
 	if (!p2_is_target()) {
 		p2_count(0);
 		return 1;
@@ -90,9 +113,9 @@ static __always_inline int p2_filter(__u32 user_port) {
 	allowed = bpf_map_lookup_elem(&p2_port, &zero);
 	if (!allowed || *allowed == 0) {
 		p2_count(0);
-		return 1;
+		return 1; /* unconfigured: fail open, see header comment */
 	}
-	if (p2_nport(user_port) == (__u16)*allowed) {
+	if (p2_nport(ctx->user_port) == (__u16)*allowed) {
 		p2_count(0);
 		return 1;
 	}
@@ -101,15 +124,15 @@ static __always_inline int p2_filter(__u32 user_port) {
 }
 
 SEC("cgroup/connect4")
-int p2_connect4(struct bpf_sock_addr *ctx) { return p2_filter(ctx->user_port); }
+int p2_connect4(struct bpf_sock_addr *ctx) { return p2_filter(ctx); }
 
 SEC("cgroup/connect6")
-int p2_connect6(struct bpf_sock_addr *ctx) { return p2_filter(ctx->user_port); }
+int p2_connect6(struct bpf_sock_addr *ctx) { return p2_filter(ctx); }
 
 SEC("cgroup/bind4")
-int p2_bind4(struct bpf_sock_addr *ctx) { return p2_filter(ctx->user_port); }
+int p2_bind4(struct bpf_sock_addr *ctx) { return p2_filter(ctx); }
 
 SEC("cgroup/bind6")
-int p2_bind6(struct bpf_sock_addr *ctx) { return p2_filter(ctx->user_port); }
+int p2_bind6(struct bpf_sock_addr *ctx) { return p2_filter(ctx); }
 
 char LICENSE[] SEC("license") = "GPL";

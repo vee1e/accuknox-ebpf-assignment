@@ -12,18 +12,20 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
+	"github.com/cilium/ebpf/rlimit"
 
 	"github.com/vee1e/accuknox-ebpf-assignment/internal/bpf/p2bpf"
 	"github.com/vee1e/accuknox-ebpf-assignment/internal/config"
 )
 
 func main() {
-	proc := flag.String("process", "myprocess", "process name (comm) to restrict")
+	proc := flag.String("process", "myprocess", "process name (comm) to restrict to one TCP port (a process can rename itself, so this is scoping, not a security boundary)")
 	port := flag.Int("port", 4040, "only TCP port the process may use (1-65535)")
 	cgroup := flag.String("cgroup", "/sys/fs/cgroup", "cgroupv2 mount point to attach to")
 	statsEvery := flag.Duration("stats", 10*time.Second, "stats log interval (0 disables)")
@@ -41,16 +43,18 @@ func run(proc string, port int, cgroupPath string, statsEvery time.Duration) err
 	if err := config.ValidatePort(port); err != nil {
 		return err
 	}
-	eff, err := config.NormalizeComm(proc)
+	eff, truncated, err := config.NormalizeComm(proc)
 	if err != nil {
 		return err
 	}
-	st, err := os.Stat(cgroupPath)
-	if err != nil {
-		return fmt.Errorf("cgroup path %q: %w", cgroupPath, err)
+	if truncated {
+		log.Printf("p2: process name truncated to comm %q (kernel keeps 15 chars)", eff)
 	}
-	if !st.IsDir() {
-		return fmt.Errorf("cgroup path %q is not a directory", cgroupPath)
+	if err := checkCgroupV2(cgroupPath); err != nil {
+		return err
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		return fmt.Errorf("remove memlock (needed on older kernels): %w", err)
 	}
 
 	objs := p2bpf.P2Objects{}
@@ -59,8 +63,12 @@ func run(proc string, port int, cgroupPath string, statsEvery time.Duration) err
 	}
 	defer func() { _ = objs.Close() }()
 
+	comm, err := config.CommKey16(eff)
+	if err != nil {
+		return err
+	}
 	var key uint32
-	if err := objs.P2Target.Update(key, p2bpf.P2P2Target{Comm: commArray(eff)}, ebpf.UpdateAny); err != nil {
+	if err := objs.P2Target.Update(key, p2bpf.P2P2Target{Comm: comm}, ebpf.UpdateAny); err != nil {
 		return fmt.Errorf("set target process: %w", err)
 	}
 	if err := objs.P2Port.Update(key, uint32(port), ebpf.UpdateAny); err != nil {
@@ -116,26 +124,46 @@ func run(proc string, port int, cgroupPath string, statsEvery time.Duration) err
 	for {
 		select {
 		case <-ctx.Done():
-			allowed, denied := readStats(&objs)
-			log.Printf("p2: detached; final stats allowed=%d denied=%d", allowed, denied)
+			allowed, denied, err := readStats(&objs)
+			if err != nil {
+				log.Printf("p2: detached; final stats unavailable: %v", err)
+			} else {
+				log.Printf("p2: detached; final stats allowed=%d denied=%d", allowed, denied)
+			}
 			return nil
 		case <-tickCh:
-			allowed, denied := readStats(&objs)
-			log.Printf("p2: stats allowed=%d denied=%d (process %q on port %d)", allowed, denied, eff, port)
+			allowed, denied, err := readStats(&objs)
+			if err != nil {
+				log.Printf("p2: stats unavailable: %v", err)
+			} else {
+				log.Printf("p2: stats allowed=%d denied=%d (process %q on port %d)", allowed, denied, eff, port)
+			}
 		}
 	}
 }
 
-func commArray(name string) [16]int8 {
-	var a [16]int8
-	for i := 0; i < len(name) && i < 16; i++ {
-		a[i] = int8(name[i])
+// checkCgroupV2 rejects non-directories and non-v2 hierarchies early,
+// so a cgroupv1 path fails with a clear message instead of a raw attach error.
+func checkCgroupV2(cgroupPath string) error {
+	st, err := os.Stat(cgroupPath)
+	if err != nil {
+		return fmt.Errorf("cgroup path %q: %w", cgroupPath, err)
 	}
-	return a
+	if !st.IsDir() {
+		return fmt.Errorf("cgroup path %q is not a directory", cgroupPath)
+	}
+	if _, err := os.Stat(filepath.Join(cgroupPath, "cgroup.controllers")); err != nil {
+		return fmt.Errorf("cgroup path %q is not a cgroupv2 mount (no cgroup.controllers): %w", cgroupPath, err)
+	}
+	return nil
 }
 
-func readStats(objs *p2bpf.P2Objects) (allowed, denied uint64) {
-	_ = objs.P2Stats.Lookup(uint32(0), &allowed)
-	_ = objs.P2Stats.Lookup(uint32(1), &denied)
-	return allowed, denied
+func readStats(objs *p2bpf.P2Objects) (allowed, denied uint64, err error) {
+	if err = objs.P2Stats.Lookup(uint32(0), &allowed); err != nil {
+		return 0, 0, fmt.Errorf("lookup allowed counter: %w", err)
+	}
+	if err = objs.P2Stats.Lookup(uint32(1), &denied); err != nil {
+		return 0, 0, fmt.Errorf("lookup denied counter: %w", err)
+	}
+	return allowed, denied, nil
 }

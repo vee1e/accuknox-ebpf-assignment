@@ -8,11 +8,13 @@
  * to lo, veth and physical NICs uniformly and still runs early in the
  * receive path, before the stack allocates sockets.
  *
- * Framing: TC ingress observes a 14-byte Ethernet header on every
- * supported interface, including loopback (verified empirically: with a
- * 0-byte offset nothing matches, with 14 the SYN is dropped). veth and
- * physical NICs are Ethernet anyway, so one fixed offset serves all.
- * Non-Ethernet interfaces (tun, sit) are out of scope.
+ * Framing: most interfaces present a 14-byte Ethernet header (TC observes
+ * one even on loopback, verified empirically). A single 802.1Q/802.1ad
+ * tag (ethertypes 0x8100/0x88A8) shifts the L3 start by 4 bytes and is
+ * handled. Anything else (double tags, non-Ethernet framing) is passed.
+ *
+ * Fragments: only the first fragment carries the TCP header, so only it
+ * is matched; non-first fragments are passed.
  *
  * All header reads use bpf_skb_load_bytes, which bounds-checks at
  * runtime and keeps the verifier happy.
@@ -25,9 +27,14 @@
 #include <bpf/bpf_helpers.h>
 
 #define IPPROTO_TCP 6
+#define ETH_P_IP 0x0800
+#define ETH_P_IPV6 0x86DD
+#define ETH_P_8021Q 0x8100
+#define ETH_P_8021AD 0x88A8
 #define TC_ACT_OK 0
 #define TC_ACT_SHOT 2
 #define L2_LEN 14
+#define VLAN_LEN 4
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
@@ -54,7 +61,9 @@ SEC("tc")
 int tc_drop_port(struct __sk_buff *skb) {
 	__u32 zero = 0;
 	__u32 *port;
+	__u32 l3 = L2_LEN;
 	__u8 ver_ihl, proto, ihl;
+	__u16 etype, frag;
 	__u16 dport;
 
 	port = bpf_map_lookup_elem(&p1_port, &zero);
@@ -63,20 +72,37 @@ int tc_drop_port(struct __sk_buff *skb) {
 		return TC_ACT_OK;
 	}
 
-	if (bpf_skb_load_bytes(skb, L2_LEN, &ver_ihl, sizeof(ver_ihl)))
+	/* Ethernet header, with one optional VLAN tag. */
+	if (bpf_skb_load_bytes(skb, 12, &etype, sizeof(etype)))
+		goto pass;
+	etype = bpf_ntohs(etype);
+	if (etype == ETH_P_8021Q || etype == ETH_P_8021AD) {
+		l3 += VLAN_LEN;
+		if (bpf_skb_load_bytes(skb, 12 + VLAN_LEN, &etype, sizeof(etype)))
+			goto pass;
+		etype = bpf_ntohs(etype);
+	}
+	if (etype != ETH_P_IP && etype != ETH_P_IPV6)
+		goto pass;
+
+	if (bpf_skb_load_bytes(skb, l3, &ver_ihl, sizeof(ver_ihl)))
 		goto pass;
 
 	if ((ver_ihl >> 4) == 4) {
-		/* IPv4: IHL counts 4-byte words, protocol at +9,
-		 * TCP dport at end of the IP header + 2. */
+		/* IPv4: IHL counts 4-byte words, frag field at +6,
+		 * protocol at +9, TCP dport at end of IP header + 2. */
 		ihl = ver_ihl & 0x0f;
 		if (ihl < 5)
 			goto pass;
-		if (bpf_skb_load_bytes(skb, L2_LEN + 9, &proto, sizeof(proto)))
+		if (bpf_skb_load_bytes(skb, l3 + 6, &frag, sizeof(frag)))
+			goto pass;
+		if ((bpf_ntohs(frag) & 0x1fff) != 0)
+			goto pass; /* non-first fragment: no TCP header */
+		if (bpf_skb_load_bytes(skb, l3 + 9, &proto, sizeof(proto)))
 			goto pass;
 		if (proto != IPPROTO_TCP)
 			goto pass;
-		if (bpf_skb_load_bytes(skb, L2_LEN + (__u32)ihl * 4 + 2, &dport, sizeof(dport)))
+		if (bpf_skb_load_bytes(skb, l3 + (__u32)ihl * 4 + 2, &dport, sizeof(dport)))
 			goto pass;
 		if (bpf_ntohs(dport) == (__u16)*port) {
 			p1_count(1);
@@ -88,11 +114,11 @@ int tc_drop_port(struct __sk_buff *skb) {
 	if ((ver_ihl >> 4) == 6) {
 		/* IPv6: next-header at +6, 40-byte fixed header, TCP dport
 		 * at +42. Extension headers are not parsed: passed. */
-		if (bpf_skb_load_bytes(skb, L2_LEN + 6, &proto, sizeof(proto)))
+		if (bpf_skb_load_bytes(skb, l3 + 6, &proto, sizeof(proto)))
 			goto pass;
 		if (proto != IPPROTO_TCP)
 			goto pass;
-		if (bpf_skb_load_bytes(skb, L2_LEN + 42, &dport, sizeof(dport)))
+		if (bpf_skb_load_bytes(skb, l3 + 42, &dport, sizeof(dport)))
 			goto pass;
 		if (bpf_ntohs(dport) == (__u16)*port) {
 			p1_count(1);

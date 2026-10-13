@@ -91,11 +91,18 @@ restoring traffic each time.
 
 ## Limitations
 
+- P1 parses Ethernet (+ one optional VLAN tag) and filters only first
+  IPv4 fragments; non-first fragments, double-tagged frames and
+  non-Ethernet framing (tun, sit) are passed, not dropped.
 - P1 parses IPv6 TCP without extension headers; packets with extension
   headers are passed, not dropped.
 - P1 matches destination port on ingress; return traffic is unaffected.
+- P2 filters TCP only; UDP and other protocols are unaffected by design.
+  `bind(0)` (ephemeral allocation) stays allowed.
 - P2 matches `comm` (15 chars, set at `exec`, threads share it). A process
   can rename itself to dodge the filter; for hard isolation use cgroup
   membership or LSM labels instead.
+- An empty/unset P2 config fails open (allows); the loader always writes
+  the maps before attaching.
 - No bpffs map pinning: configuration lives as long as the loader runs;
   stopping the loader detaches and restores traffic (by design).

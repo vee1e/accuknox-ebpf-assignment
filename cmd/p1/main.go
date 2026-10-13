@@ -16,6 +16,7 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
+	"github.com/cilium/ebpf/rlimit"
 
 	"github.com/vee1e/accuknox-ebpf-assignment/internal/bpf/p1bpf"
 	"github.com/vee1e/accuknox-ebpf-assignment/internal/config"
@@ -42,6 +43,9 @@ func run(port int, ifaceName string, statsEvery time.Duration) error {
 	iface, err := net.InterfaceByName(ifaceName)
 	if err != nil {
 		return fmt.Errorf("lookup interface %q: %w", ifaceName, err)
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		return fmt.Errorf("remove memlock (needed on older kernels): %w", err)
 	}
 
 	objs := p1bpf.P1Objects{}
@@ -85,18 +89,30 @@ func run(port int, ifaceName string, statsEvery time.Duration) error {
 	for {
 		select {
 		case <-ctx.Done():
-			passed, dropped := readStats(&objs)
-			log.Printf("p1: detached from %s; final stats passed=%d dropped=%d", ifaceName, passed, dropped)
+			passed, dropped, err := readStats(&objs)
+			if err != nil {
+				log.Printf("p1: detached from %s; final stats unavailable: %v", ifaceName, err)
+			} else {
+				log.Printf("p1: detached from %s; final stats passed=%d dropped=%d", ifaceName, passed, dropped)
+			}
 			return nil
 		case <-tickCh:
-			passed, dropped := readStats(&objs)
-			log.Printf("p1: stats passed=%d dropped=%d (blocked port %d)", passed, dropped, port)
+			passed, dropped, err := readStats(&objs)
+			if err != nil {
+				log.Printf("p1: stats unavailable: %v", err)
+			} else {
+				log.Printf("p1: stats passed=%d dropped=%d (blocked port %d)", passed, dropped, port)
+			}
 		}
 	}
 }
 
-func readStats(objs *p1bpf.P1Objects) (passed, dropped uint64) {
-	_ = objs.P1Stats.Lookup(uint32(0), &passed)
-	_ = objs.P1Stats.Lookup(uint32(1), &dropped)
-	return passed, dropped
+func readStats(objs *p1bpf.P1Objects) (passed, dropped uint64, err error) {
+	if err = objs.P1Stats.Lookup(uint32(0), &passed); err != nil {
+		return 0, 0, fmt.Errorf("lookup passed counter: %w", err)
+	}
+	if err = objs.P1Stats.Lookup(uint32(1), &dropped); err != nil {
+		return 0, 0, fmt.Errorf("lookup dropped counter: %w", err)
+	}
+	return passed, dropped, nil
 }

@@ -13,7 +13,7 @@ all: build
 # resolves its fields against the running kernel's BTF at load time.
 generate:
 	$(GO) generate $(P1_PKG) $(P2_PKG)
-	gofmt -l internal cmd test testdata
+	test -z "$$(gofmt -l internal cmd test testdata)"
 
 build:
 	$(GO) build ./...

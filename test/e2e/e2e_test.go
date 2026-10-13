@@ -43,14 +43,16 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "e2e:", err)
 		os.Exit(1)
 	}
-	defer os.RemoveAll(tmp)
 	dialerBin = filepath.Join(tmp, "dialer")
 	// dialer source lives in testdata relative to repo root; resolve via runtime file.
 	if out, err := exec.Command("go", "build", "-o", dialerBin, "../../testdata/dialer").CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "e2e: build dialer: %v\n%s\n", err, out)
+		_ = os.RemoveAll(tmp)
 		os.Exit(1)
 	}
-	os.Exit(m.Run())
+	code := m.Run()
+	_ = os.RemoveAll(tmp)
+	os.Exit(code)
 }
 
 // freePorts returns n free localhost TCP ports (closed immediately after,
@@ -139,6 +141,10 @@ func TestP1DropAndReconfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("attach TCX: %v", err)
 	}
+	// Safety net: any Fatalf below still detaches. The explicit Close
+	// later tests the detach-restores-traffic path; the deferred second
+	// Close is a harmless no-op by then.
+	defer func() { _ = tclink.Close() }()
 
 	if dialOK(t, "tcp", blocked) {
 		t.Fatalf("port %d should be dropped", blocked)
@@ -146,6 +152,7 @@ func TestP1DropAndReconfig(t *testing.T) {
 	if !dialOK(t, "tcp", allowed) {
 		t.Fatalf("port %d should pass", allowed)
 	}
+	assertP1Stats(t, &objs, 1, 1)
 
 	// Runtime reconfig takes effect immediately: flip the blocked port.
 	if err := objs.P1Port.Update(key, uint32(allowed), ebpf.UpdateAny); err != nil {
@@ -185,8 +192,27 @@ func TestP1IPv6(t *testing.T) {
 			_ = c.Close()
 		}
 	}()
+	// Second listener on another port must keep passing.
+	l2, err := net.Listen("tcp6", "[::1]:0")
+	if err != nil {
+		t.Skipf("no second IPv6 listener: %v", err)
+	}
+	allowed := l2.Addr().(*net.TCPAddr).Port
+	t.Cleanup(func() { _ = l2.Close() })
+	go func() {
+		for {
+			c, err := l2.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
 
-	iface, _ := net.InterfaceByName("lo")
+	iface, err := net.InterfaceByName("lo")
+	if err != nil {
+		t.Fatalf("lo: %v", err)
+	}
 	objs := p1bpf.P1Objects{}
 	if err := p1bpf.LoadP1Objects(&objs, nil); err != nil {
 		t.Fatalf("load: %v", err)
@@ -198,10 +224,28 @@ func TestP1IPv6(t *testing.T) {
 	if err != nil {
 		t.Fatalf("attach: %v", err)
 	}
-	defer tclink.Close()
+	defer func() { _ = tclink.Close() }()
 	time.Sleep(200 * time.Millisecond)
 	if dialOK(t, "tcp6", blocked) {
 		t.Fatalf("IPv6 port %d should be dropped", blocked)
+	}
+	if !dialOK(t, "tcp6", allowed) {
+		t.Fatalf("IPv6 port %d should pass", allowed)
+	}
+	assertP1Stats(t, &objs, 1, 1)
+}
+
+func assertP1Stats(t *testing.T, objs *p1bpf.P1Objects, wantPassed, wantDropped uint64) {
+	t.Helper()
+	var passed, dropped uint64
+	if err := objs.P1Stats.Lookup(uint32(0), &passed); err != nil {
+		t.Fatalf("stats passed: %v", err)
+	}
+	if err := objs.P1Stats.Lookup(uint32(1), &dropped); err != nil {
+		t.Fatalf("stats dropped: %v", err)
+	}
+	if passed < wantPassed || dropped < wantDropped {
+		t.Fatalf("stats passed=%d dropped=%d, want at least %d/%d", passed, dropped, wantPassed, wantDropped)
 	}
 }
 
@@ -217,8 +261,12 @@ func TestP2ProcessFilter(t *testing.T) {
 	}
 	defer func() { _ = objs.Close() }()
 
+	comm, err := config.CommKey16(target)
+	if err != nil {
+		t.Fatalf("comm: %v", err)
+	}
 	var key uint32
-	if err := objs.P2Target.Update(key, p2bpf.P2P2Target{Comm: commVal(t, target)}, ebpf.UpdateAny); err != nil {
+	if err := objs.P2Target.Update(key, p2bpf.P2P2Target{Comm: comm}, ebpf.UpdateAny); err != nil {
 		t.Fatalf("set target: %v", err)
 	}
 	if err := objs.P2Port.Update(key, uint32(allowedPort), ebpf.UpdateAny); err != nil {
@@ -269,6 +317,12 @@ func TestP2ProcessFilter(t *testing.T) {
 	if out := runDialer(t, "otherproc", otherPort, false); !strings.HasPrefix(out, "OK") {
 		t.Fatalf("other other port: %s", out)
 	}
+	// TCP-only scope: UDP from the target process is unaffected.
+	udpPort := serveUDP(t)
+	if out := runDialerUDP(t, target, udpPort); !strings.HasPrefix(out, "OK") {
+		t.Fatalf("target UDP must be unaffected: %s", out)
+	}
+	assertP2Denied(t, &objs, 1)
 	// Bind side: point the filter at a fresh free port (the served ports
 	// are already bound by listeners, so binding them would fail with
 	// EADDRINUSE regardless of BPF). This also proves runtime reconfig.
@@ -286,6 +340,10 @@ func TestP2ProcessFilter(t *testing.T) {
 	}
 	if out := runDialer(t, "otherproc", bindOther, true); !strings.HasPrefix(out, "OK") {
 		t.Fatalf("otherproc bind unaffected: %s", out)
+	}
+	// bind(0) asks the kernel for an ephemeral port and must stay allowed.
+	if out := runDialer(t, target, 0, true); !strings.HasPrefix(out, "OK") {
+		t.Fatalf("target bind(0) must be allowed: %s", out)
 	}
 
 	// Detach restores: target reaches the other port again.
@@ -309,15 +367,39 @@ func runDialer(t *testing.T, comm string, port int, bind bool) string {
 	return strings.TrimSpace(string(out))
 }
 
-func commVal(t *testing.T, name string) [16]int8 {
+func runDialerUDP(t *testing.T, comm string, port int) string {
 	t.Helper()
-	norm, err := config.NormalizeComm(name)
+	out, _ := exec.Command(dialerBin, "--comm", comm, "--port", strconv.Itoa(port), "--udp").CombinedOutput()
+	return strings.TrimSpace(string(out))
+}
+
+// serveUDP starts a UDP listener and returns its port.
+func serveUDP(t *testing.T) int {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("comm: %v", err)
+		t.Fatalf("udp listen: %v", err)
 	}
-	var a [16]int8
-	for i := 0; i < len(norm); i++ {
-		a[i] = int8(norm[i])
+	t.Cleanup(func() { _ = pc.Close() })
+	go func() {
+		buf := make([]byte, 1500)
+		for {
+			_, _, err := pc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return pc.LocalAddr().(*net.UDPAddr).Port
+}
+
+func assertP2Denied(t *testing.T, objs *p2bpf.P2Objects, want uint64) {
+	t.Helper()
+	var denied uint64
+	if err := objs.P2Stats.Lookup(uint32(1), &denied); err != nil {
+		t.Fatalf("stats denied: %v", err)
 	}
-	return a
+	if denied < want {
+		t.Fatalf("stats denied=%d, want at least %d", denied, want)
+	}
 }

@@ -65,10 +65,11 @@ kill "$S4040" "$S4050" 2>/dev/null || true
 sleep 1
 echo "--- myprocess binds 4040 (expect OK) ---"
 /tmp/ak-dialer --comm myprocess --port 4040 --bind
-echo "--- myprocess binds 4051 (expect FAIL, denied) ---"
-/tmp/ak-dialer --comm myprocess --port 4051 --bind || true
-echo "--- otherproc binds 4051 (expect OK, unaffected) ---"
-/tmp/ak-dialer --comm otherproc --port 4051 --bind
+FREE_PORT=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])' 2>/dev/null || echo 4051)
+echo "--- myprocess binds $FREE_PORT (expect FAIL, denied) ---"
+/tmp/ak-dialer --comm myprocess --port "$FREE_PORT" --bind || true
+echo "--- otherproc binds $FREE_PORT (expect OK, unaffected) ---"
+/tmp/ak-dialer --comm otherproc --port "$FREE_PORT" --bind
 echo "--- p2 log ---"; cat /tmp/p2.log
 kill "$P2"; wait "$P2" 2>/dev/null || true; P2=""
 

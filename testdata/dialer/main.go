@@ -1,6 +1,6 @@
 // Command dialer is an e2e/demo helper: it sets its own comm name
 // (via /proc/self/comm, no special syscalls needed) and then makes a
-// single TCP connection attempt, reporting OK or FAIL.
+// single TCP/UDP connection attempt (or bind), reporting OK or FAIL.
 package main
 
 import (
@@ -17,8 +17,14 @@ func main() {
 	port := flag.Int("port", 4040, "server port")
 	bind := flag.Bool("bind", false, "bind the port instead of dialing it")
 	serve := flag.Bool("serve", false, "listen forever (TCP server for demos/tests)")
+	udp := flag.Bool("udp", false, "use UDP instead of TCP (dial only)")
 	timeout := flag.Duration("timeout", 3*time.Second, "dial timeout")
 	flag.Parse()
+
+	network := "tcp"
+	if *udp {
+		network = "udp"
+	}
 
 	if *comm != "" {
 		f, err := os.OpenFile("/proc/self/comm", os.O_WRONLY, 0)
@@ -61,7 +67,7 @@ func main() {
 		return
 	}
 
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", *host, *port), *timeout)
+	conn, err := net.DialTimeout(network, fmt.Sprintf("%s:%d", *host, *port), *timeout)
 	if err != nil {
 		fmt.Printf("FAIL %s:%d comm=%s err=%v\n", *host, *port, *comm, err)
 		os.Exit(1)

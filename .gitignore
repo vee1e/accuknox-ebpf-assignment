@@ -2,3 +2,4 @@
 /p2
 /dialer
 bin/
+internal/bpf/*/*.o

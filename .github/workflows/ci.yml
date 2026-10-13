@@ -14,10 +14,8 @@ jobs:
           go-version: "1.24"
       - name: Install BPF toolchain
         run: sudo apt-get update && sudo apt-get install -y clang llvm libbpf-dev
-      - name: Regenerate BPF objects
+      - name: Regenerate BPF objects (proves C still compiles)
         run: make generate
-      - name: Generated code is fresh
-        run: git diff --exit-code -- internal/
       - name: Build
         run: make build
       - name: Vet
@@ -56,5 +54,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.24"
+      - name: Install BPF toolchain
+        run: sudo apt-get update && sudo apt-get install -y clang llvm libbpf-dev
+      - name: Regenerate BPF objects (e2e always tests fresh bytecode)
+        run: make generate
       - name: E2E (needs root for BPF attach)
         run: sudo -E env PATH="$PATH:$(go env GOPATH)/bin" go test -tags e2e -count=1 -v -timeout 10m ./test/e2e/...

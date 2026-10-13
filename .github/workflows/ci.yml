@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - name: Install BPF toolchain
+        run: sudo apt-get update && sudo apt-get install -y clang llvm libbpf-dev bpftool
+      - name: Regenerate BPF objects
+        run: make generate
+      - name: Generated code is fresh
+        run: git diff --exit-code -- internal/
+      - name: Build
+        run: make build
+      - name: Vet
+        run: make vet
+
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - name: Unit tests
+        run: go test -count=1 ./...
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - name: Install BPF toolchain (clang-format)
+        run: sudo apt-get update && sudo apt-get install -y clang-format
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.1.6
+      - name: clang-format check
+        run: clang-format --dry-run --Werror bpf/p1_drop_port.c bpf/p2_proc_filter.c
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - name: E2E (needs root for BPF attach)
+        run: sudo -E env PATH="$PATH:$(go env GOPATH)/bin" go test -tags e2e -count=1 -v -timeout 10m ./test/e2e/...

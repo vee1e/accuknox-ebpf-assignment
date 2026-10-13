@@ -45,8 +45,10 @@ demo.sh         scripted terminal demo for the video recording
 - Linux kernel >= 6.6 with BTF (`/sys/kernel/btf/vmlinux`), TCX (P1) and
   cgroupv2 mounted at `/sys/fs/cgroup` (P2). Tested on 6.10 (Docker
   Desktop) and Ubuntu 24.04 runners.
-- Root (`CAP_NET_ADMIN`/`CAP_BPF`). BPF toolchain (`clang`, `libbpf-dev`,
-  `bpftool`) only needed to regenerate bindings (`make generate`).
+- Root (`CAP_NET_ADMIN`/`CAP_BPF`). BPF toolchain (`clang`, `libbpf-dev`)
+  only needed to regenerate bindings (`make generate`). `bpf/vmlinux.h` is
+  a committed minimal header; CO-RE resolves its fields against the running
+  kernel's BTF at load time.
 
 ## Build and run
 
@@ -59,8 +61,8 @@ sudo ./p2 --process myprocess --port 4040  # Problem 2, Ctrl-C detaches
 Regenerate (Linux, installs toolchain first):
 
 ```bash
-sudo apt-get install -y clang llvm libbpf-dev bpftool
-make generate   # bpftool dumps bpf/vmlinux.h, bpf2go rebuilds internal/bpf/...
+sudo apt-get install -y clang llvm libbpf-dev
+make generate   # bpf2go rebuilds internal/bpf/... from bpf/*.c
 ```
 
 ## Tests

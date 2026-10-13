@@ -43,12 +43,9 @@ func run(proc string, port int, cgroupPath string, statsEvery time.Duration) err
 	if err := config.ValidatePort(port); err != nil {
 		return err
 	}
-	eff, truncated, err := config.NormalizeComm(proc)
+	eff, err := config.NormalizeComm(proc)
 	if err != nil {
 		return err
-	}
-	if truncated {
-		log.Printf("p2: process name truncated to comm %q (kernel keeps 15 chars)", eff)
 	}
 	if err := checkCgroupV2(cgroupPath); err != nil {
 		return err

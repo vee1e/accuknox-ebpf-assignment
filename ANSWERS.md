@@ -107,4 +107,7 @@ func main() {
 
 `tasks` makes `main` wait for the queued function, so "HERE1" always
 prints. `close(cnp)` lets the `range` loops terminate so the workers stop
-instead of leaking, and `workers.Wait()` joins them before exit.
+instead of leaking, and `workers.Wait()` joins them before exit. (Toy
+scope: a panicking task would skip `tasks.Done()`; production code wraps
+`f()` to always mark completion. Ordering of "Hello" vs "HERE1" stays
+nondeterministic; both print.)

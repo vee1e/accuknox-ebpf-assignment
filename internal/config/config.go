@@ -20,31 +20,31 @@ func ValidatePort(p int) error {
 	return nil
 }
 
-// NormalizeComm checks a process name and truncates it the way the
-// kernel truncates comm to 15 chars. It reports whether truncation
-// happened so callers can warn: filtering "averylongname" when the user
-// typed "averylongname-extra" would be a silent surprise otherwise.
-func NormalizeComm(name string) (eff string, truncated bool, err error) {
+// NormalizeComm validates a process name against kernel comm limits:
+// non-empty, no NUL bytes, at most 15 chars. Overlong names are rejected
+// rather than truncated: the kernel compares only the first 15 chars, so
+// truncating "averylongname-extra" would also filter "averylongname-other".
+func NormalizeComm(name string) (string, error) {
 	if name == "" {
-		return "", false, fmt.Errorf("process name must not be empty")
+		return "", fmt.Errorf("process name must not be empty")
 	}
 	for _, r := range name {
-		if r == '/' || r == '\x00' {
-			return "", false, fmt.Errorf("process name %q contains invalid character", name)
+		if r == '\x00' {
+			return "", fmt.Errorf("process name contains NUL byte")
 		}
 	}
 	if len(name) > MaxCommName {
-		return name[:MaxCommName], true, nil
+		return "", fmt.Errorf("process name %q too long: kernel comm keeps %d chars", name, MaxCommName)
 	}
-	return name, false, nil
+	return name, nil
 }
 
 // CommKey16 builds the 16-byte NUL-padded comm value for BPF maps.
-// The name is normalized first, so overlong input can never produce an
-// unterminated key that matches nothing.
+// The name is validated first, so the key always matches what the kernel
+// stores for that exact name.
 func CommKey16(name string) ([16]int8, error) {
 	var k [16]int8
-	norm, _, err := NormalizeComm(name)
+	norm, err := NormalizeComm(name)
 	if err != nil {
 		return k, err
 	}

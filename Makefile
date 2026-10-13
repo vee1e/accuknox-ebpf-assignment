@@ -16,7 +16,9 @@ generate:
 	test -z "$$(gofmt -l internal cmd test testdata)"
 
 build:
-	$(GO) build ./...
+	$(GO) build -o bin/p1 ./cmd/p1
+	$(GO) build -o bin/p2 ./cmd/p2
+	$(GO) build -o bin/dialer ./testdata/dialer
 
 test:
 	$(GO) test -count=1 ./...
@@ -40,5 +42,5 @@ demo:
 	sudo bash ./demo.sh
 
 clean:
-	rm -f p1 p2 dialer
+	rm -rf bin
 	$(GO) clean

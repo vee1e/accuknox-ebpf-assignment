@@ -24,14 +24,16 @@ CO-RE C with `vmlinux.h`), plus a written answer for Problem 3
   is denied before any packet is sent. Both `connect` (outbound) and
   `bind` (listeners) are filtered.
 
-The blocked/allowed port and the target process name live in BPF maps, so
-userspace configures them with CLI flags (`--port`, `--process`) with no
-BPF recompile. Updating the map takes effect on the next packet/syscall.
+The blocked/allowed port and the target process name live in BPF maps,
+set from CLI flags (`--port`, `--process`) at startup with no BPF
+recompile. Map updates take effect on the next packet/syscall (covered by
+e2e); the loaders themselves write the maps once at startup, so changing
+the flag means restarting the loader.
 
 ## Layout
 
 ```
-bpf/            kernel C (p1_drop_port.c, p2_proc_filter.c; vmlinux.h generated)
+bpf/            kernel C (p1_drop_port.c, p2_proc_filter.c, minimal vmlinux.h)
 cmd/p1, cmd/p2  Go loaders (flags, attach, maps, signal handling, stats)
 internal/config flag validation (unit-tested)
 internal/bpf/   bpf2go-generated bindings (committed, so builds need no clang)
@@ -53,9 +55,9 @@ demo.sh         scripted terminal demo for the video recording
 ## Build and run
 
 ```bash
-go build ./...            # or: make build
-sudo ./p1 --port 4040 --iface lo        # Problem 1, Ctrl-C detaches
-sudo ./p2 --process myprocess --port 4040  # Problem 2, Ctrl-C detaches
+make build                # emits bin/p1, bin/p2, bin/dialer
+sudo ./bin/p1 --port 4040 --iface lo           # Problem 1, Ctrl-C detaches
+sudo ./bin/p2 --process myprocess --port 4040  # Problem 2, Ctrl-C detaches
 ```
 
 Regenerate (Linux, installs toolchain first):
@@ -91,6 +93,8 @@ restoring traffic each time.
 
 ## Limitations
 
+- P1 attaches to one interface (`--iface`, default `lo`). Traffic on other
+  interfaces is unaffected.
 - P1 parses Ethernet (+ one optional VLAN tag) and filters only first
   IPv4 fragments; non-first fragments, double-tagged frames and
   non-Ethernet framing (tun, sit) are passed, not dropped.
@@ -99,9 +103,13 @@ restoring traffic each time.
 - P1 matches destination port on ingress; return traffic is unaffected.
 - P2 filters TCP only; UDP and other protocols are unaffected by design.
   `bind(0)` (ephemeral allocation) stays allowed.
-- P2 matches `comm` (15 chars, set at `exec`, threads share it). A process
-  can rename itself to dodge the filter; for hard isolation use cgroup
-  membership or LSM labels instead.
+- P2 applies to new connections and binds only; already-established flows
+  keep going after attach.
+- P2 matches `comm`, which is per-thread, set at `exec`, capped at 15
+  chars, and changeable by the process itself (names over 15 chars are
+  rejected to avoid prefix collisions). A process can rename itself to
+  dodge the filter; for hard isolation use cgroup membership or LSM labels
+  instead.
 - An empty/unset P2 config fails open (allows); the loader always writes
   the maps before attaching.
 - No bpffs map pinning: configuration lives as long as the loader runs;

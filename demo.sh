@@ -5,6 +5,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+S4040="" S4050="" P1="" P2=""
+
 [ "$(id -u)" -eq 0 ] || { echo "demo: must run as root"; exit 1; }
 [ "$(uname -s)" = "Linux" ] || { echo "demo: Linux only"; exit 1; }
 

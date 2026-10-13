@@ -19,26 +19,20 @@ func TestValidatePort(t *testing.T) {
 }
 
 func TestNormalizeComm(t *testing.T) {
-	got, trunc, err := NormalizeComm("myprocess")
-	if err != nil || got != "myprocess" || trunc {
-		t.Fatalf("NormalizeComm(myprocess) = %q, %v, %v", got, trunc, err)
+	got, err := NormalizeComm("myprocess")
+	if err != nil || got != "myprocess" {
+		t.Fatalf("NormalizeComm(myprocess) = %q, %v", got, err)
 	}
-	if _, _, err := NormalizeComm(""); err == nil {
+	if _, err := NormalizeComm(""); err == nil {
 		t.Fatal("empty name must fail")
 	}
-	if _, _, err := NormalizeComm("a/b"); err == nil {
-		t.Fatal("slash must fail")
+	// Overlong names fail instead of truncating: truncating would also
+	// filter every other process sharing the 15-char prefix.
+	if _, err := NormalizeComm(strings.Repeat("x", 30)); err == nil {
+		t.Fatal("overlong name must fail, not truncate")
 	}
-	long := strings.Repeat("x", 30)
-	got, trunc, err = NormalizeComm(long)
-	if err != nil {
-		t.Fatalf("long name must truncate, got %v", err)
-	}
-	if !trunc {
-		t.Fatal("overlong name must report truncation")
-	}
-	if len(got) != MaxCommName {
-		t.Fatalf("truncated len = %d, want %d", len(got), MaxCommName)
+	if _, err := NormalizeComm(strings.Repeat("x", MaxCommName)); err != nil {
+		t.Fatalf("15-char name must pass: %v", err)
 	}
 }
 
@@ -55,19 +49,10 @@ func TestCommKey16(t *testing.T) {
 			t.Fatal("key must be NUL-padded")
 		}
 	}
-	// Overlong input truncates exactly like the kernel, so the key
-	// always matches what the kernel stores.
-	klong, err := CommKey16(strings.Repeat("y", 30))
-	if err != nil {
-		t.Fatalf("CommKey16 long: %v", err)
-	}
-	for i := 0; i < MaxCommName; i++ {
-		if klong[i] != int8('y') {
-			t.Fatalf("key[%d] = %d, want 'y'", i, klong[i])
-		}
-	}
-	if klong[15] != 0 {
-		t.Fatal("key must stay NUL-terminated after truncation")
+	// Overlong input is rejected, so the key always matches exactly the
+	// name the kernel stores (no 15-char prefix collisions).
+	if _, err := CommKey16(strings.Repeat("y", 30)); err == nil {
+		t.Fatal("overlong input must fail")
 	}
 	if _, err := CommKey16(""); err == nil {
 		t.Fatal("empty name must fail")

@@ -282,9 +282,13 @@ func TestP2ProcessFilter(t *testing.T) {
 		{objs.P2Bind6, ebpf.AttachCGroupInet6Bind},
 	}
 	var links []link.Link
+	cgroupPath := os.Getenv("AK_CGROUP")
+	if cgroupPath == "" {
+		cgroupPath = "/sys/fs/cgroup"
+	}
 	for _, p := range progs {
 		l, err := link.AttachCgroup(link.CgroupOptions{
-			Path:    "/sys/fs/cgroup",
+			Path:    cgroupPath,
 			Attach:  p.attach,
 			Program: p.prog,
 		})

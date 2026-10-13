@@ -82,6 +82,11 @@ process is unaffected, detach restores; invalid flags rejected (unit).
 
 ## Demo (for the video)
 
+[![asciicast](https://asciinema.org/a/mguGdB6WKFEEdLXr.svg)](https://asciinema.org/a/mguGdB6WKFEEdLXr)
+
+Recorded terminal demo: https://asciinema.org/a/mguGdB6WKFEEdLXr
+(replay locally with `asciinema play demo.cast`).
+
 ```bash
 sudo bash ./demo.sh
 ```
